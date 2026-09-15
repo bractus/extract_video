@@ -1,0 +1,19 @@
+# Interface, download do YouTube, transcricao com tempos e exportacao .docx
+streamlit>=1.36
+yt-dlp>=2024.8.6
+faster-whisper>=1.0.3
+python-docx>=1.1.0
+imageio-ffmpeg>=0.5.1   # binario do ffmpeg empacotado (dispensa instalar no sistema)
+requests>=2.31
+numpy>=1.26
+truststore>=0.9         # usa os certificados do Windows (rede corporativa com proxy TLS)
+
+# Identificacao de falantes (quem falou cada trecho), no modo local.
+# Pesado: ~2,5 GB de download por causa do PyTorch.
+# Exige um token do Hugging Face e aceitar os termos dos modelos:
+#   https://huggingface.co/pyannote/speaker-diarization-community-1  (pyannote 4)
+#   https://huggingface.co/pyannote/speaker-diarization-3.1
+#   https://huggingface.co/pyannote/segmentation-3.0
+torch>=2.2
+torchaudio>=2.2
+pyannote.audio>=3.1
