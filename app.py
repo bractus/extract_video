@@ -157,16 +157,12 @@ class Resultado:
 # --------------------------------------------------------------------------- #
 # Utilidades
 # --------------------------------------------------------------------------- #
-def hms(segundos: float, com_ms: bool = False) -> str:
-    """Converte segundos em HH:MM:SS (opcionalmente com milissegundos)."""
+def hms(segundos: float) -> str:
+    """Converte segundos em HH:MM:SS."""
     segundos = max(0.0, float(segundos))
     h, resto = divmod(int(segundos), 3600)
     m, s = divmod(resto, 60)
-    base = f"{h:02d}:{m:02d}:{s:02d}"
-    if com_ms:
-        ms = int(round((segundos - int(segundos)) * 1000))
-        return f"{base},{ms:03d}"
-    return base
+    return f"{h:02d}:{m:02d}:{s:02d}"
 
 
 def achar_ffmpeg() -> str | None:
@@ -557,17 +553,28 @@ def converter_para_wav16k(origem: Path, destino: Path) -> Path:
 # --------------------------------------------------------------------------- #
 # 2) Transcrição local — faster-whisper
 # --------------------------------------------------------------------------- #
-MODELO = "small"          # equilibrio entre qualidade e tempo em CPU
+# O peso do app é quase todo aqui. Em CPU limitada — como a do Streamlit
+# Community Cloud, que derruba a cota quando o processo insiste em usar tudo —
+# o modelo 'small' leva perto de 3x o tempo do 'base' sem ganho proporcional em
+# português. Quem tiver máquina folgada pode subir de volta definindo
+# WHISPER_MODELO=small (ou descer para 'tiny', mais rápido e mais impreciso).
+MODELO = os.environ.get("WHISPER_MODELO", "base")
 DISPOSITIVO = "cpu"
 COMPUTE_TYPE = "int8"     # quantizacao que torna o modelo viavel em CPU
 IDIOMA = "pt"
+
+# Sem limite explícito o CTranslate2 abre uma thread por núcleo visível e satura
+# a máquina — que é justamente o que dispara o estrangulamento no servidor.
+THREADS = max(1, min(2, (os.cpu_count() or 2)))
 
 
 @st.cache_resource(show_spinner=False)
 def carregar_whisper():
     from faster_whisper import WhisperModel
 
-    return WhisperModel(MODELO, device=DISPOSITIVO, compute_type=COMPUTE_TYPE)
+    return WhisperModel(
+        MODELO, device=DISPOSITIVO, compute_type=COMPUTE_TYPE, cpu_threads=THREADS
+    )
 
 
 def transcrever_local(
@@ -583,25 +590,27 @@ def transcrever_local(
         str(wav),
         language=IDIOMA,
         task="transcribe",
-        beam_size=5,
+        # Busca gulosa: o beam de 5 decodifica cinco hipóteses em paralelo e
+        # multiplica o custo sem mudar muito o texto em fala clara.
+        beam_size=1,
+        # O VAD corta o silêncio antes de decodificar — economia, não custo.
         vad_filter=True,
         vad_parameters={"min_silence_duration_ms": 500},
-        word_timestamps=True,
+        # Marcar palavra a palavra exige um passo extra de alinhamento por
+        # segmento. Como os blocos são agrupados de qualquer forma, o tempo por
+        # segmento já basta para a decupagem.
+        word_timestamps=False,
         condition_on_previous_text=False,
     )
     total = float(getattr(info, "duration", 0.0)) or 1.0
 
     palavras: list[dict] = []
     for seg in segmentos:
-        if seg.words:
-            for w in seg.words:
-                if w.word.strip():
-                    palavras.append(
-                        {"inicio": float(w.start), "fim": float(w.end), "texto": w.word}
-                    )
-        elif seg.text.strip():
+        if texto := seg.text.strip():
+            # O espaço à esquerda mantém a junção correta em montar_blocos, que
+            # concatena os trechos sem separador (as palavras já vinham assim).
             palavras.append(
-                {"inicio": float(seg.start), "fim": float(seg.end), "texto": seg.text}
+                {"inicio": float(seg.start), "fim": float(seg.end), "texto": " " + texto}
             )
         progresso(min(1.0, float(seg.end) / total))
     progresso(1.0)
@@ -708,22 +717,6 @@ def gerar_docx(res: Resultado) -> bytes:
     return buffer.getvalue()
 
 
-def gerar_txt(res: Resultado) -> bytes:
-    linhas = [res.meta.get("titulo", "Decupagem"), res.meta.get("url", ""), ""]
-    for b in res.blocos:
-        linhas.append(f"[{hms(b.inicio)} – {hms(b.fim)}] {b.texto}")
-        linhas.append("")
-    return "\n".join(linhas).encode("utf-8")
-
-
-def gerar_srt(res: Resultado) -> bytes:
-    partes = [
-        f"{i}\n{hms(b.inicio, com_ms=True)} --> {hms(b.fim, com_ms=True)}\n{b.texto}\n"
-        for i, b in enumerate(res.blocos, start=1)
-    ]
-    return "\n".join(partes).encode("utf-8")
-
-
 # --------------------------------------------------------------------------- #
 # 5) Orquestração
 # --------------------------------------------------------------------------- #
@@ -815,12 +808,15 @@ if executar:
             with st.status("Preparando…", expanded=True) as status:
                 inicio = time.time()
                 resultado = processar(cfg, status)
+                status.update(label="Montando o documento…")
+                documento = gerar_docx(resultado)
                 status.update(
                     label=f"Concluído em {hms(time.time() - inicio)}",
                     state="complete",
                     expanded=False,
                 )
             st.session_state["resultado"] = resultado
+            st.session_state["docx"] = documento
         except Exception as exc:
             st.error(f"Não foi possível concluir a decupagem: {exc}")
             texto_erro = str(exc).lower()
@@ -855,26 +851,19 @@ if executar:
 # Resultado
 # --------------------------------------------------------------------------- #
 res: Resultado | None = st.session_state.get("resultado")
-if res:
+if res and st.session_state.get("docx"):
     st.success(f"{len(res.blocos)} trechos transcritos.")
 
     nome_base = slug(res.meta.get("titulo", "decupagem"))
-    c1, c2, c3 = st.columns([2, 1, 1])
-    c1.download_button(
+    # O .docx vem pronto do processamento: montá-lo aqui o refaria a cada
+    # interação com a página, já que o Streamlit reexecuta o script inteiro.
+    st.download_button(
         "📄 Baixar .docx",
-        data=gerar_docx(res),
+        data=st.session_state["docx"],
         file_name=f"{nome_base}.docx",
         mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         type="primary",
         use_container_width=True,
-    )
-    c2.download_button(
-        "TXT", gerar_txt(res),
-        file_name=f"{nome_base}.txt", mime="text/plain", use_container_width=True,
-    )
-    c3.download_button(
-        "SRT", gerar_srt(res),
-        file_name=f"{nome_base}.srt", mime="text/plain", use_container_width=True,
     )
 
     st.dataframe(
