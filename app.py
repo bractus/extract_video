@@ -208,6 +208,25 @@ def proxy_configurado() -> str:
         return ""
 
 
+# O cookies.txt fica fora do repositório (está no .gitignore): ele equivale a
+# estar logado na conta do YouTube. Por isso são dois caminhos — o arquivo ao
+# lado do app, para quem roda na própria máquina, e o conteúdo colado nos
+# secrets, único jeito de levá-lo a um servidor sem versionar a credencial.
+COOKIES_LOCAL = Path(__file__).parent / "cookies.txt"
+
+
+def cookies_configurados() -> tuple[str | None, bytes | None]:
+    """Cookies do YouTube, se houver. Devolve (caminho, conteúdo)."""
+    try:
+        if conteudo := st.secrets.get("YTDLP_COOKIES", ""):
+            return None, conteudo.encode("utf-8")
+    except Exception:
+        pass
+    if COOKIES_LOCAL.is_file() and COOKIES_LOCAL.stat().st_size > 0:
+        return str(COOKIES_LOCAL), None
+    return None, None
+
+
 def _data_legivel(aaaammdd: str | None) -> str:
     if not aaaammdd or len(aaaammdd) != 8:
         return ""
@@ -481,6 +500,11 @@ def baixar_audio(
         opts["cookiesfrombrowser"] = (cookies_browser,)
     if cookies_file:
         opts["cookiefile"] = cookies_file
+        # O yt-dlp reescreve o arquivo com os cookies rotacionados ao terminar,
+        # o que mantém a sessão viva por mais tempo.
+        log("Usando os cookies da sessão do YouTube.")
+    else:
+        log("Sem cookies: se o YouTube pedir confirmação de humano, vai falhar.")
 
     arquivo, info = _extrair_com_rodizio(opts, url, destino, log)
 
@@ -786,13 +810,14 @@ if executar:
         for e in erros:
             st.error(e)
     else:
+        caminho_cookies, bytes_cookies = cookies_configurados()
         cfg = {
             "url": url.strip(),
-            # O YouTube às vezes exige cookies de uma sessão logada; sem interface
-            # de configuração, o app roda sem eles.
+            # O YouTube às vezes exige cookies de uma sessão logada; quando há um
+            # cookies.txt disponível ele entra sozinho, sem pedir nada na tela.
             "cookies_browser": None,
-            "cookies_file": None,
-            "cookies_bytes": None,
+            "cookies_file": caminho_cookies,
+            "cookies_bytes": bytes_cookies,
             # Em servidor o solucionador de desafios é praticamente obrigatório.
             "solver_remoto": NA_NUVEM,
             "ca_bundle": None,
