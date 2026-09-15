@@ -3,7 +3,6 @@ streamlit>=1.36
 yt-dlp>=2024.8.6
 faster-whisper>=1.0.3
 python-docx>=1.1.0
-requests>=2.31
 
 # ffmpeg empacotado, dispensa instalar no sistema
 imageio-ffmpeg>=0.5.1

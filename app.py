@@ -192,6 +192,22 @@ def valida_url(url: str) -> bool:
     return bool(re.match(r"https?://", url.strip(), flags=re.I))
 
 
+def proxy_configurado() -> str:
+    """Proxy para o yt-dlp, se houver um definido no ambiente ou nos secrets.
+
+    É a única forma de baixar do YouTube a partir de um servidor: os IPs de
+    datacenter são recusados, e sair por um proxy residencial contorna isso.
+    Fica fora da interface de propósito — é configuração de implantação.
+    """
+    for chave in ("YTDLP_PROXY", "HTTPS_PROXY", "HTTP_PROXY"):
+        if valor := os.environ.get(chave):
+            return valor
+    try:
+        return st.secrets.get("YTDLP_PROXY", "")
+    except Exception:
+        return ""
+
+
 def _data_legivel(aaaammdd: str | None) -> str:
     if not aaaammdd or len(aaaammdd) != 8:
         return ""
@@ -319,12 +335,39 @@ ERROS_DEFINITIVOS = (
 )
 
 
-def _extrair_com_rodizio(opts: dict, url: str, log: Callable[[str], None]) -> dict:
+# Abaixo disso o arquivo não tem áudio de verdade: é o resto de um download em
+# que o YouTube recusou todos os fragmentos.
+TAMANHO_MINIMO_AUDIO = 32 * 1024
+
+
+def _arquivo_baixado(destino: Path, vid: str) -> Path | None:
+    """O maior arquivo já finalizado do vídeo (ignora .part e afins)."""
+    candidatos = sorted(
+        (p for p in destino.glob(f"{vid}.*")
+         if p.is_file() and p.suffix.lower() not in (".part", ".ytdl", ".temp")),
+        key=lambda p: -p.stat().st_size,
+    )
+    return candidatos[0] if candidatos else None
+
+
+def _limpar(destino: Path) -> None:
+    for p in destino.iterdir():
+        if p.is_file() and p.name != "cookies.txt":
+            p.unlink(missing_ok=True)
+
+
+def _extrair_com_rodizio(
+    opts: dict, url: str, destino: Path, log: Callable[[str], None]
+) -> tuple[Path, dict]:
     """Baixa tentando clientes diferentes do YouTube até um funcionar.
 
     Cada "player client" do YouTube entrega as URLs de mídia sob regras próprias:
     uns exigem que o desafio de JavaScript seja resolvido, outros não. Quando um
     é recusado com 403 ou não devolve formato nenhum, outro costuma passar.
+
+    O download também é conferido depois de pronto: o YouTube às vezes aceita o
+    pedido e recusa todos os fragmentos, o que deixaria um arquivo oco passar por
+    bom.
     """
     import yt_dlp
 
@@ -339,14 +382,28 @@ def _extrair_com_rodizio(opts: dict, url: str, log: Callable[[str], None]) -> di
                 f"cliente {', '.join(clientes)}…")
         try:
             with yt_dlp.YoutubeDL(opcoes) as ydl:
-                return ydl.extract_info(url, download=True)
+                info = ydl.extract_info(url, download=True)
         except Exception as exc:
             ultimo_erro = exc
             if any(marca in str(exc).lower() for marca in ERROS_DEFINITIVOS):
                 raise
             log("Não deu certo; tentando outro cliente do YouTube…")
+            _limpar(destino)
+            continue
 
-    raise ultimo_erro  # type: ignore[misc]
+        arquivo = _arquivo_baixado(destino, info.get("id", "audio"))
+        if arquivo is None or arquivo.stat().st_size < TAMANHO_MINIMO_AUDIO:
+            ultimo_erro = RuntimeError(
+                "O YouTube aceitou o pedido mas não entregou o conteúdo "
+                "(fragmentos recusados)."
+            )
+            log("O arquivo veio vazio; tentando outro cliente do YouTube…")
+            _limpar(destino)
+            continue
+
+        return arquivo, info
+
+    raise ultimo_erro or RuntimeError("Não foi possível baixar o áudio do vídeo.")
 
 
 def baixar_audio(
@@ -378,8 +435,17 @@ def baixar_audio(
         "noprogress": True,
         "noplaylist": True,
         "retries": 3,
+        "fragment_retries": 3,
+        # Sem isto o yt-dlp pula os fragmentos recusados e termina "com sucesso",
+        # entregando um arquivo sem áudio nenhum.
+        "skip_unavailable_fragments": False,
         "logger": _LoggerYtdlp(log),
     }
+    if proxy := proxy_configurado():
+        opts["proxy"] = proxy
+        # Não registramos o endereço: costuma trazer usuário e senha embutidos.
+        log("Saindo por proxy configurado.")
+
     ffmpeg_sistema = shutil.which("ffmpeg")
     if ffmpeg_sistema:
         opts["ffmpeg_location"] = str(Path(ffmpeg_sistema).parent)
@@ -414,17 +480,7 @@ def baixar_audio(
     if cookies_file:
         opts["cookiefile"] = cookies_file
 
-    info = _extrair_com_rodizio(opts, url, log)
-
-    vid = info.get("id", "audio")
-    # As tentativas anteriores podem ter deixado downloads pela metade (.part).
-    candidatos = sorted(
-        (p for p in destino.glob(f"{vid}.*")
-         if p.is_file() and p.suffix.lower() not in (".part", ".ytdl", ".temp")),
-        key=lambda p: -p.stat().st_size,
-    )
-    if not candidatos:
-        raise RuntimeError("O download terminou, mas nenhum arquivo de áudio foi encontrado.")
+    arquivo, info = _extrair_com_rodizio(opts, url, destino, log)
 
     meta = {
         "titulo": info.get("title") or "(sem título)",
@@ -432,10 +488,10 @@ def baixar_audio(
         "duracao": float(info.get("duration") or 0.0),
         "url": info.get("webpage_url") or url,
         "publicado_em": _data_legivel(info.get("upload_date")),
-        "id": vid,
+        "id": info.get("id", "audio"),
     }
-    log(f"Áudio obtido: {candidatos[0].name}")
-    return candidatos[0], meta
+    log(f"Áudio obtido: {arquivo.name} ({arquivo.stat().st_size / 1e6:.1f} MB)")
+    return arquivo, meta
 
 
 def converter_para_wav16k(origem: Path, destino: Path) -> Path:
@@ -654,7 +710,8 @@ def processar(cfg: dict, status) -> Resultado:
     # --- áudio ---
     if cfg["fonte"] == "arquivo":
         origem = pasta / cfg["arquivo_nome"]
-        origem.write_bytes(cfg["arquivo_bytes"])
+        with open(origem, "wb") as destino_arquivo:
+            shutil.copyfileobj(cfg["arquivo"], destino_arquivo, 1024 * 1024)
         meta = {"titulo": Path(cfg["arquivo_nome"]).stem, "url": "", "canal": "",
                 "publicado_em": "", "duracao": 0.0}
         log(f"Arquivo recebido: {origem.name}")
@@ -706,7 +763,23 @@ st.caption(
     "marcação de tempo e entregue em .docx."
 )
 
-fonte = st.radio("Fonte do áudio", ["Link do YouTube", "Arquivo local"], horizontal=True)
+# Em servidor o YouTube recusa o download, então a opção que funciona vem
+# selecionada de saída — a menos que haja um proxy configurado.
+YOUTUBE_BLOQUEADO = NA_NUVEM and not proxy_configurado()
+
+fonte = st.radio(
+    "Fonte do áudio",
+    ["Link do YouTube", "Arquivo local"],
+    index=1 if YOUTUBE_BLOQUEADO else 0,
+    horizontal=True,
+)
+
+if YOUTUBE_BLOQUEADO and fonte == "Link do YouTube":
+    st.info(
+        "O YouTube recusa downloads vindos de servidores, e este app está hospedado "
+        "em um. O link costuma falhar aqui — baixe o vídeo na sua máquina e use "
+        "**Arquivo local**. (Para habilitar o link, defina `YTDLP_PROXY` nos secrets.)"
+    )
 
 url = ""
 upload = None
@@ -734,7 +807,7 @@ if executar:
         cfg = {
             "fonte": "arquivo" if fonte == "Arquivo local" else "youtube",
             "url": url.strip(),
-            "arquivo_bytes": upload.getvalue() if upload else None,
+            "arquivo": upload,
             "arquivo_nome": upload.name if upload else None,
             # O YouTube às vezes exige cookies de uma sessão logada; sem interface
             # de configuração, o app roda sem eles.
@@ -764,20 +837,25 @@ if executar:
                     "Erro de certificado TLS — comum em rede corporativa com proxy que "
                     "inspeciona o tráfego. Se estiver em VPN corporativa, tente fora dela."
                 )
-            elif "403" in texto_erro or "forbidden" in texto_erro or "bot" in texto_erro:
-                motivo = (
-                    "\n\nEm servidor isso é a regra, não a exceção: o YouTube passou a "
-                    "exigir um *proof of origin token* de IPs de datacenter, e o yt-dlp "
-                    "não gera esse token sozinho."
-                    if NA_NUVEM else
-                    "\n\nCostuma ser temporário; tente de novo em alguns minutos."
-                )
-                st.warning(
-                    "**O YouTube recusou o download.** Os dados do vídeo chegaram, mas "
-                    "a URL do áudio foi bloqueada." + motivo
-                    + "\n\nO caminho que sempre funciona é a fonte **Arquivo local**: "
-                    "baixe o vídeo na sua máquina e envie o arquivo aqui."
-                )
+            elif any(m in texto_erro for m in ("403", "forbidden", "bot", "fragment",
+                                                "não entregou o conteúdo")):
+                if NA_NUVEM:
+                    st.warning(
+                        "**O YouTube bloqueou o download.** Não é falha do app: o "
+                        "YouTube recusa conexões vindas de IPs de datacenter, que é o "
+                        "caso de qualquer servidor — inclusive o do Streamlit Cloud.\n\n"
+                        "**Use a fonte Arquivo local**, logo acima: baixe o vídeo na sua "
+                        "máquina e envie o arquivo aqui. A transcrição roda normalmente.\n\n"
+                        "Para que o link do YouTube funcione aqui, só saindo por um "
+                        "proxy residencial: basta definir `YTDLP_PROXY` nos *secrets* "
+                        "do app que ele passa a ser usado automaticamente."
+                    )
+                else:
+                    st.warning(
+                        "**O YouTube recusou o download.** Costuma ser temporário; "
+                        "tente de novo em alguns minutos. Se insistir, use a fonte "
+                        "**Arquivo local** com o vídeo já baixado."
+                    )
             with st.expander("Detalhes técnicos"):
                 import traceback
 

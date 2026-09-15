@@ -1,0 +1,6 @@
+[server]
+# Arquivos de audio longos passam facil dos 200 MB padrao.
+maxUploadSize = 400
+
+[browser]
+gatherUsageStats = false

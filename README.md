@@ -1,8 +1,12 @@
 # Decupagem de vídeos do YouTube
 
 Aplicativo Streamlit que recebe o link de um vídeo do YouTube, extrai o áudio,
-transcreve com marcação de tempo, identifica quem falou cada trecho e exporta
-o resultado em `.docx` (e também em `.txt` e `.srt`).
+transcreve com marcação de tempo e exporta em `.docx` (e também em `.txt` e
+`.srt`).
+
+Não há tela de configuração: o app transcreve **áudio em português**, com o
+modelo **Whisper small**, rodando em **CPU**. Toda a transcrição acontece na
+própria máquina — nada é enviado para serviços de terceiros.
 
 ## Instalação
 
@@ -10,25 +14,8 @@ o resultado em `.docx` (e também em `.txt` e `.srt`).
 pip install -r requirements.txt
 ```
 
-Isso já inclui o `ffmpeg` (via `imageio-ffmpeg`), então não é preciso instalar
-nada fora do Python. O download passa de 2,5 GB por causa do PyTorch, que só é
-usado pela identificação de falantes — se você não for usar esse recurso, pode
-remover as três últimas linhas do `requirements.txt`.
-
-Para identificar os falantes no modo local ainda é preciso:
-
-1. criar um token de leitura em <https://huggingface.co/settings/tokens>;
-2. aceitar os termos dos modelos de diarização no Hugging Face:
-   [speaker-diarization-community-1](https://huggingface.co/pyannote/speaker-diarization-community-1)
-   (usado pelo pyannote 4) ou
-   [speaker-diarization-3.1](https://huggingface.co/pyannote/speaker-diarization-3.1)
-   (pyannote 3), além do
-   [segmentation-3.0](https://huggingface.co/pyannote/segmentation-3.0).
-   O app tenta o modelo adequado à versão instalada e cai para o outro se
-   precisar.
-
-O token pode ser colado na barra lateral ou definido na variável de ambiente
-`HF_TOKEN`.
+Já vêm incluídos o `ffmpeg` (via `imageio-ffmpeg`) e o Node (via
+`nodejs-wheel-binaries`), então não é preciso instalar nada fora do Python.
 
 ## Uso
 
@@ -36,102 +23,90 @@ O token pode ser colado na barra lateral ou definido na variável de ambiente
 streamlit run app.py
 ```
 
-O navegador abre em <http://localhost:8501>. Cole o link, clique em **Decupar** e,
-ao final, baixe o `.docx`. Antes de exportar dá para renomear os falantes
-(`FALANTE 1` → `Maria`, por exemplo), escolher entre layout em parágrafos ou em
-tabela e decidir se os tempos entram no documento.
+O navegador abre em <http://localhost:8501>. Cole o link, clique em **Decupar**
+e baixe o `.docx` ao final. Também é possível enviar um arquivo de áudio ou
+vídeo do computador em vez de usar um link.
 
-Também é possível enviar um arquivo de áudio ou vídeo do computador em vez de
-usar um link.
+Em CPU, a transcrição leva cerca de um terço da duração do áudio: um vídeo de
+9 minutos fica pronto em aproximadamente 3 minutos.
 
-## Os dois motores de transcrição
+## Como a transcrição é dividida
 
-| | Local (faster-whisper) | AssemblyAI (nuvem) |
-|---|---|---|
-| Custo | gratuito | pago por hora de áudio |
-| Privacidade | o áudio não sai da máquina | o áudio é enviado ao serviço |
-| Velocidade | depende da CPU/GPU | rápida |
-| Identificação de falantes | exige pyannote + token | já vem incluída |
-
-No modo local, o modelo `small` costuma ser o melhor equilíbrio em CPU: cerca de
-1 a 2 minutos de processamento por minuto de áudio. Com GPU NVIDIA, o
-`large-v3` fica viável e a opção `cuda` aparece sozinha na barra lateral.
-
-Para usar a AssemblyAI, cole a chave na barra lateral ou defina
-`ASSEMBLYAI_API_KEY`.
-
-## Como os falantes são atribuídos
-
-O Whisper devolve o tempo de cada palavra e o pyannote devolve os intervalos de
-cada participante. Cada palavra recebe o falante cujo intervalo tem maior
-sobreposição com ela; em seguida as palavras viram blocos, que são cortados
-quando o falante muda, quando há uma pausa maior que 2 segundos ou quando o
-trecho passa de 45 segundos e termina em pontuação final.
-
-Informar a quantidade de participantes na barra lateral melhora bastante o
-resultado quando você já sabe quantas pessoas falam.
+O Whisper devolve o tempo de cada palavra. As palavras viram blocos, cortados
+quando há uma pausa maior que 2 segundos, ou — quando o bloco já passou de 40
+segundos — na primeira fronteira natural do texto: ponto final primeiro, vírgula
+depois. Acima de 75 segundos o corte é forçado, porque fala corrida sem
+pontuação renderia parágrafos intransponíveis no documento.
 
 ## Problemas comuns
 
 **`CERTIFICATE_VERIFY_FAILED`** — rede corporativa com proxy que intercepta o
-TLS. O app já valida os certificados pelo repositório do Windows (pacote
-`truststore`), o que resolve a maioria dos casos. Se persistir, abra *Erro de
-certificado (rede corporativa)* na barra lateral e informe o `.pem` da sua
-empresa; a opção de ignorar a verificação existe como último recurso e deixa a
-conexão sujeita a interceptação.
-
-**`Sign in to confirm you're not a bot`** — o YouTube pediu autenticação. Em
-*Vídeo restrito ou bloqueado*, escolha os cookies de um navegador em que você já
-esteja logado.
+TLS. O app já resolve isso sozinho: monta um pacote de certificados juntando os
+públicos do `certifi` com os instalados no sistema, porque o yt-dlp consulta
+apenas o `certifi` e ignora tanto o repositório do Windows quanto a variável
+`SSL_CERT_FILE`.
 
 **`No supported JavaScript runtime`** — o YouTube embaralha as URLs de mídia com
 um desafio em JavaScript, e resolvê-lo exige um runtime externo. Atenção à
-palavra *supported*: o yt-dlp recusa versões antigas (Node abaixo da 22, Deno
-abaixo da 2.3), e um Node 18 instalado pelo sistema aparece no `PATH` mas é
-ignorado — o download então falha com 403. Por isso o `requirements.txt` traz o
-`nodejs-wheel-binaries`, que instala um Node recente pelo próprio pip; o app
-confere a versão antes de usar e diz no painel de status qual runtime pegou.
+palavra *supported*: o yt-dlp recusa versões antigas (Node abaixo da 22), e um
+Node 18 instalado pelo sistema aparece no `PATH` mas é ignorado. Por isso o
+`requirements.txt` traz o `nodejs-wheel-binaries`, que instala um Node recente
+pelo próprio pip; o app confere a versão antes de usar e informa no painel qual
+runtime pegou.
 
 **`HTTP Error 403: Forbidden` no download** — os dados do vídeo chegaram, mas a
-URL da mídia foi recusada. Quase sempre é o desafio de JavaScript não resolvido:
-confira no painel de status se algum runtime foi aceito (veja o item anterior).
-O app ainda tenta sozinho vários *player clients* do YouTube antes de desistir,
-porque cada um entrega as URLs sob regras diferentes.
+URL da mídia foi recusada. O app tenta sozinho vários *player clients* do
+YouTube antes de desistir, porque cada um entrega as URLs sob regras diferentes.
+Localmente costuma ser temporário.
 
-**`requires a GVS PO Token`** — alguns clientes do YouTube passaram a exigir um
-*proof of origin token*. O yt-dlp não gera esse token sozinho: seria preciso um
-provedor externo (`bgutil-ytdlp-pot-provider`), que depende de um servidor
-próprio e não roda no Streamlit Community Cloud. O rodízio de clientes existe
-justamente para cair em algum que ainda não exija o token.
+**`fragment not found; Skipping fragment`** — o YouTube aceitou o pedido e
+recusou os fragmentos, um por um. Por padrão o yt-dlp pula os que faltam e
+termina "com sucesso", entregando um arquivo sem áudio nenhum; o app desliga
+esse comportamento e ainda confere o tamanho do arquivo baixado, de modo que a
+tentativa seja descartada e o próximo player client entre em cena, em vez de
+transcrever silêncio.
 
-**Transcrição muito lenta** — troque para um modelo menor (`base` ou `tiny`) ou
-use o motor AssemblyAI.
+**`requires a GVS PO Token`** — o YouTube passou a exigir um *proof of origin
+token* de conexões suspeitas, sobretudo de IPs de datacenter. O yt-dlp não gera
+esse token sozinho: precisaria de um provedor externo, que depende de servidor
+próprio. Não há contorno pelo app.
 
 ## Publicação no Streamlit Community Cloud
 
-O runtime de JavaScript vem pelo `requirements.txt`, no pacote
-`nodejs-wheel-binaries` — e não pelo `packages.txt`, porque o `nodejs` do apt do
-Debian é a versão 18, antiga demais para o yt-dlp, que a ignora e deixa o
-download morrer em 403. O `packages.txt` fica só com o `ffmpeg`.
+O app roda normalmente lá, **mas o download direto do YouTube não funciona** — e
+isso não é defeito do código. O YouTube recusa conexões vindas de IPs de
+datacenter, que é o caso de qualquer servidor. A recusa aparece de três formas,
+todas com a mesma origem: `HTTP 403`, `requires a GVS PO Token` e fragmentos que
+retornam "not found". Nenhuma delas tem contorno pelo aplicativo: o yt-dlp não
+gera PO Token sozinho, e o provedor externo que geraria precisa de um servidor
+Node compilado à parte, que a plataforma não permite.
 
-Mudanças no `packages.txt` ou no `requirements.txt` só valem depois de um
-**Reboot app** no painel do Streamlit Cloud; um rerun não basta.
+Por isso, quando roda hospedado, o app já vem com a fonte **Arquivo local**
+selecionada: você baixa o vídeo na sua máquina e envia o arquivo. A transcrição
+acontece normalmente no servidor. O limite de upload está em 400 MB
+(`.streamlit/config.toml`); para vídeos longos, converta para áudio antes, que o
+arquivo fica bem menor.
 
-Ainda assim, **baixar do YouTube a partir de um servidor é pouco confiável**, e
-isso não é um defeito do código: o YouTube trata IPs de datacenter com muito mais
-desconfiança do que uma conexão doméstica, e pode recusar o download mesmo com
-tudo configurado. Quando isso acontecer, as saídas são:
+Para que o link do YouTube funcione na nuvem, a única saída é sair por um proxy
+residencial. Basta definir `YTDLP_PROXY` nos *secrets* do app, em
+`Settings → Secrets`:
 
-1. usar a fonte **Arquivo local**, enviando o áudio ou vídeo já baixado;
-2. enviar um `cookies.txt` de uma sessão logada, pela barra lateral;
-3. rodar o app na sua máquina, onde o download funciona normalmente.
+```toml
+YTDLP_PROXY = "http://usuario:senha@host:porta"
+```
 
-Vale lembrar também que o plano gratuito tem pouca memória: prefira o motor
-AssemblyAI ou modelos pequenos, já que o pyannote e os modelos grandes do Whisper
-costumam estourar o limite.
+Com isso definido, o app volta a aceitar links normalmente. As variáveis
+`HTTPS_PROXY` e `HTTP_PROXY` também são respeitadas.
+
+Quanto aos arquivos de implantação: o `packages.txt` instala o `ffmpeg`; o Node
+vem pelo `requirements.txt`, no pacote `nodejs-wheel-binaries` — e não pelo
+`packages.txt`, porque o `nodejs` do apt do Debian é a versão 18, antiga demais
+para o yt-dlp. Mudanças nesses arquivos só valem depois de um **Reboot app** no
+painel; um rerun não basta.
 
 ## Arquivos
 
 - `app.py` — o aplicativo inteiro (interface e processamento).
 - `requirements.txt` — todas as dependências.
 - `packages.txt` — pacotes de sistema para o Streamlit Community Cloud.
+- `.streamlit/config.toml` — limite de upload.
