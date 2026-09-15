@@ -710,30 +710,22 @@ def processar(cfg: dict, status) -> Resultado:
     pasta.mkdir(parents=True, exist_ok=True)
 
     # --- áudio ---
-    if cfg["fonte"] == "arquivo":
-        origem = pasta / cfg["arquivo_nome"]
-        with open(origem, "wb") as destino_arquivo:
-            shutil.copyfileobj(cfg["arquivo"], destino_arquivo, 1024 * 1024)
-        meta = {"titulo": Path(cfg["arquivo_nome"]).stem, "url": "", "canal": "",
-                "publicado_em": "", "duracao": 0.0}
-        log(f"Arquivo recebido: {origem.name}")
-    else:
-        status.update(label="Baixando o áudio do YouTube…")
-        cookies = cfg["cookies_file"]
-        if cfg["cookies_bytes"]:
-            arquivo_cookies = pasta / "cookies.txt"
-            arquivo_cookies.write_bytes(cfg["cookies_bytes"])
-            cookies = str(arquivo_cookies)
-        origem, meta = baixar_audio(
-            cfg["url"],
-            pasta,
-            cookies_browser=cfg["cookies_browser"],
-            cookies_file=cookies,
-            solver_remoto=cfg["solver_remoto"],
-            ca_bundle=cfg["ca_bundle"],
-            ignorar_certificado=cfg["ignorar_certificado"],
-            log=log,
-        )
+    status.update(label="Baixando o vídeo do YouTube…")
+    cookies = cfg["cookies_file"]
+    if cfg["cookies_bytes"]:
+        arquivo_cookies = pasta / "cookies.txt"
+        arquivo_cookies.write_bytes(cfg["cookies_bytes"])
+        cookies = str(arquivo_cookies)
+    origem, meta = baixar_audio(
+        cfg["url"],
+        pasta,
+        cookies_browser=cfg["cookies_browser"],
+        cookies_file=cookies,
+        solver_remoto=cfg["solver_remoto"],
+        ca_bundle=cfg["ca_bundle"],
+        ignorar_certificado=cfg["ignorar_certificado"],
+        log=log,
+    )
 
     status.update(label="Extraindo o áudio do vídeo…")
     wav = converter_para_wav16k(origem, pasta / "audio16k.wav")
@@ -771,52 +763,31 @@ st.caption(
     "marcação de tempo e entregue em .docx."
 )
 
-# Em servidor o YouTube recusa o download, então a opção que funciona vem
-# selecionada de saída — a menos que haja um proxy configurado.
+# Em servidor o YouTube recusa o download.
 YOUTUBE_BLOQUEADO = NA_NUVEM and not proxy_configurado()
 
-fonte = st.radio(
-    "Fonte do áudio",
-    ["Link do YouTube", "Arquivo local"],
-    index=1 if YOUTUBE_BLOQUEADO else 0,
-    horizontal=True,
-)
-
-if YOUTUBE_BLOQUEADO and fonte == "Link do YouTube":
-    st.info(
+if YOUTUBE_BLOQUEADO:
+    st.warning(
         "O YouTube recusa downloads vindos de servidores, e este app está hospedado "
-        "em um. O link costuma falhar aqui — baixe o vídeo na sua máquina e use "
-        "**Arquivo local**. (Para habilitar o link, defina `YTDLP_PROXY` nos secrets.)"
+        "em um. O link costuma falhar aqui. (Para habilitar o link, defina "
+        "`YTDLP_PROXY` nos secrets.)"
     )
 
-url = ""
-upload = None
-if fonte == "Link do YouTube":
-    url = st.text_input("Link do vídeo", placeholder="https://www.youtube.com/watch?v=…")
-else:
-    upload = st.file_uploader(
-        "Áudio ou vídeo",
-        type=["mp3", "wav", "m4a", "ogg", "opus", "flac", "mp4", "mkv", "webm", "mov"],
-    )
+url = st.text_input("Link do vídeo", placeholder="https://www.youtube.com/watch?v=…")
 
 executar = st.button("▶️ Decupar", type="primary", use_container_width=True)
 
 if executar:
     erros = []
-    if fonte == "Link do YouTube" and not valida_url(url):
+    if not valida_url(url):
         erros.append("Informe um link válido (começando com http:// ou https://).")
-    if fonte == "Arquivo local" and upload is None:
-        erros.append("Envie um arquivo de áudio ou vídeo.")
 
     if erros:
         for e in erros:
             st.error(e)
     else:
         cfg = {
-            "fonte": "arquivo" if fonte == "Arquivo local" else "youtube",
             "url": url.strip(),
-            "arquivo": upload,
-            "arquivo_nome": upload.name if upload else None,
             # O YouTube às vezes exige cookies de uma sessão logada; sem interface
             # de configuração, o app roda sem eles.
             "cookies_browser": None,
@@ -852,8 +823,6 @@ if executar:
                         "**O YouTube bloqueou o download.** Não é falha do app: o "
                         "YouTube recusa conexões vindas de IPs de datacenter, que é o "
                         "caso de qualquer servidor — inclusive o do Streamlit Cloud.\n\n"
-                        "**Use a fonte Arquivo local**, logo acima: baixe o vídeo na sua "
-                        "máquina e envie o arquivo aqui. A transcrição roda normalmente.\n\n"
                         "Para que o link do YouTube funcione aqui, só saindo por um "
                         "proxy residencial: basta definir `YTDLP_PROXY` nos *secrets* "
                         "do app que ele passa a ser usado automaticamente."
@@ -861,8 +830,7 @@ if executar:
                 else:
                     st.warning(
                         "**O YouTube recusou o download.** Costuma ser temporário; "
-                        "tente de novo em alguns minutos. Se insistir, use a fonte "
-                        "**Arquivo local** com o vídeo já baixado."
+                        "tente de novo em alguns minutos."
                     )
             with st.expander("Detalhes técnicos"):
                 import traceback
