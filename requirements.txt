@@ -6,7 +6,8 @@ python-docx>=1.1.0
 imageio-ffmpeg>=0.5.1   # binario do ffmpeg empacotado (dispensa instalar no sistema)
 requests>=2.31
 numpy>=1.26
-truststore>=0.9         # usa os certificados do Windows (rede corporativa com proxy TLS)
+truststore>=0.9         # usa os certificados do sistema (rede corporativa com proxy TLS)
+nodejs-wheel-binaries>=22   # Node 22+ para o yt-dlp resolver os desafios do YouTube
 
 # Identificacao de falantes (quem falou cada trecho), no modo local.
 # Pesado: ~2,5 GB de download por causa do PyTorch.

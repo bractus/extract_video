@@ -232,6 +232,77 @@ class _LoggerYtdlp:
 
 
 # --------------------------------------------------------------------------- #
+# Runtime JavaScript
+#
+# O YouTube embaralha as URLs de mídia com um desafio em JavaScript. Sem resolvê-lo
+# as URLs vêm inválidas e o download morre em "HTTP Error 403". Quem resolve é um
+# runtime externo, e o yt-dlp exige versões mínimas — o Node do apt do Debian, por
+# exemplo, é antigo demais e acaba recusado em silêncio. Por isso aqui a versão é
+# conferida antes, e o caminho vai explícito para o yt-dlp.
+# --------------------------------------------------------------------------- #
+VERSOES_MINIMAS_JS = {
+    "deno": (2, 3, 0),
+    "node": (22, 0, 0),
+    "bun": (1, 2, 11),
+}
+
+
+def _versao_do_executavel(caminho: str) -> tuple[int, ...] | None:
+    try:
+        saida = subprocess.run(
+            [caminho, "--version"], capture_output=True, text=True, timeout=20
+        )
+    except Exception:
+        return None
+    achado = re.search(r"(\d+)\.(\d+)\.(\d+)", (saida.stdout or "") + (saida.stderr or ""))
+    return tuple(int(n) for n in achado.groups()) if achado else None
+
+
+def _node_empacotado() -> str | None:
+    """O Node instalado via pip (nodejs-wheel-binaries), que fica dentro do pacote
+    em vez de entrar no PATH — é como garantimos uma versão recente no servidor."""
+    try:
+        import nodejs_wheel.executable as ne
+
+        raiz = Path(ne.ROOT_DIR)
+        caminho = raiz / "node.exe" if os.name == "nt" else raiz / "bin" / "node"
+        return str(caminho) if caminho.exists() else None
+    except Exception:
+        return None
+
+
+@st.cache_data(show_spinner=False, ttl=300)
+def runtimes_js_suportados() -> tuple[dict, list[str]]:
+    """Devolve ({runtime: {'path': ...}}, ['recusados por serem antigos'])."""
+    candidatos: list[tuple[str, str]] = []
+    if empacotado := _node_empacotado():
+        candidatos.append(("node", empacotado))
+    for nome, executavel in (("deno", "deno"), ("node", "node"), ("bun", "bun")):
+        if achado := shutil.which(executavel):
+            candidatos.append((nome, achado))
+
+    runtimes: dict[str, dict] = {}
+    recusados: dict[str, str] = {}
+    for nome, caminho in candidatos:
+        if nome in runtimes:
+            continue  # já temos um binário bom para este runtime
+        versao = _versao_do_executavel(caminho)
+        if versao is None:
+            continue
+        minima = VERSOES_MINIMAS_JS[nome]
+        if versao >= minima:
+            runtimes[nome] = {"path": caminho}
+            recusados.pop(nome, None)
+        else:
+            recusados.setdefault(
+                nome,
+                f"{nome} {'.'.join(map(str, versao))} "
+                f"(o yt-dlp exige {'.'.join(map(str, minima))} ou mais novo)",
+            )
+    return runtimes, list(recusados.values())
+
+
+# --------------------------------------------------------------------------- #
 # 1) Download e extração do áudio
 # --------------------------------------------------------------------------- #
 # Cada "player client" do YouTube entrega as URLs de mídia sob regras próprias.
@@ -323,20 +394,19 @@ def baixar_audio(
     if ffmpeg_sistema:
         opts["ffmpeg_location"] = str(Path(ffmpeg_sistema).parent)
 
-    # O YouTube exige um runtime JavaScript para liberar todos os formatos.
-    # Só o deno vem habilitado por padrão; aproveitamos qualquer um instalado.
-    executaveis = {"deno": "deno", "node": "node", "bun": "bun", "quickjs": "qjs"}
-    runtimes = {nome: {} for nome, exe in executaveis.items() if shutil.which(exe)}
+    runtimes, recusados = runtimes_js_suportados()
     if runtimes:
         opts["js_runtimes"] = runtimes
-        log(f"Runtime JavaScript: {', '.join(runtimes)}")
-    elif NA_NUVEM:
-        log("Sem runtime JavaScript no servidor: o YouTube vai recusar boa parte dos "
-            "formatos. Acrescente um arquivo packages.txt com a linha 'nodejs' ao "
-            "repositório e reinicie o app.")
+        log("Runtime JavaScript: "
+            + ", ".join(f"{n} ({Path(c['path']).name})" for n, c in runtimes.items()))
     else:
-        log("Nenhum runtime JavaScript encontrado; alguns formatos podem faltar. "
-            "Instale o Deno ou o Node.js se o download falhar.")
+        aviso = ("Sem runtime JavaScript utilizável: o YouTube não vai liberar os "
+                 "formatos de áudio e o download tende a falhar com 403.")
+        if recusados:
+            aviso += " Encontrado, mas recusado pelo yt-dlp: " + "; ".join(recusados) + "."
+        aviso += (" Instale o pacote 'nodejs-wheel-binaries' (já está no requirements.txt)"
+                  " ou o Deno 2.3+.")
+        log(aviso)
     if solver_remoto:
         opts["remote_components"] = ["ejs:github"]
 
@@ -344,7 +414,7 @@ def baixar_audio(
         aplicar_ca_bundle(ca_bundle)
         log(f"Usando os certificados de {ca_bundle}.")
     elif CERTIFICADOS_DO_SISTEMA:
-        log("Validando o TLS pelos certificados do Windows.")
+        log("Validando o TLS pelos certificados instalados no sistema.")
     if ignorar_certificado:
         opts["nocheckcertificate"] = True
         log("Atenção: a verificação do certificado TLS está desativada.")

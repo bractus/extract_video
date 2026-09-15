@@ -84,26 +84,38 @@ conexão sujeita a interceptação.
 *Vídeo restrito ou bloqueado*, escolha os cookies de um navegador em que você já
 esteja logado.
 
-**`No supported JavaScript runtime`** — o YouTube exige um interpretador de
-JavaScript para liberar todos os formatos. O app usa automaticamente o Deno,
-Node, Bun ou QuickJS que estiver instalado; se não houver nenhum, instale o
-[Deno](https://deno.com/) ou o [Node.js](https://nodejs.org/). Quando ainda
-assim faltarem formatos, marque *Baixar o solucionador de desafios do YouTube*.
+**`No supported JavaScript runtime`** — o YouTube embaralha as URLs de mídia com
+um desafio em JavaScript, e resolvê-lo exige um runtime externo. Atenção à
+palavra *supported*: o yt-dlp recusa versões antigas (Node abaixo da 22, Deno
+abaixo da 2.3), e um Node 18 instalado pelo sistema aparece no `PATH` mas é
+ignorado — o download então falha com 403. Por isso o `requirements.txt` traz o
+`nodejs-wheel-binaries`, que instala um Node recente pelo próprio pip; o app
+confere a versão antes de usar e diz no painel de status qual runtime pegou.
 
-**`HTTP Error 403: Forbidden` no download** — os dados do vídeo chegaram, mas o
-YouTube recusou a URL da mídia. Quase sempre é o desafio de JavaScript que não
-foi resolvido: confirme que existe um runtime instalado (veja o item anterior).
+**`HTTP Error 403: Forbidden` no download** — os dados do vídeo chegaram, mas a
+URL da mídia foi recusada. Quase sempre é o desafio de JavaScript não resolvido:
+confira no painel de status se algum runtime foi aceito (veja o item anterior).
 O app ainda tenta sozinho vários *player clients* do YouTube antes de desistir,
 porque cada um entrega as URLs sob regras diferentes.
+
+**`requires a GVS PO Token`** — alguns clientes do YouTube passaram a exigir um
+*proof of origin token*. O yt-dlp não gera esse token sozinho: seria preciso um
+provedor externo (`bgutil-ytdlp-pot-provider`), que depende de um servidor
+próprio e não roda no Streamlit Community Cloud. O rodízio de clientes existe
+justamente para cair em algum que ainda não exija o token.
 
 **Transcrição muito lenta** — troque para um modelo menor (`base` ou `tiny`) ou
 use o motor AssemblyAI.
 
 ## Publicação no Streamlit Community Cloud
 
-O `packages.txt` deste repositório instala o `nodejs` e o `ffmpeg` no servidor —
-sem o runtime de JavaScript o YouTube recusa quase todos os formatos e o download
-termina em 403.
+O runtime de JavaScript vem pelo `requirements.txt`, no pacote
+`nodejs-wheel-binaries` — e não pelo `packages.txt`, porque o `nodejs` do apt do
+Debian é a versão 18, antiga demais para o yt-dlp, que a ignora e deixa o
+download morrer em 403. O `packages.txt` fica só com o `ffmpeg`.
+
+Mudanças no `packages.txt` ou no `requirements.txt` só valem depois de um
+**Reboot app** no painel do Streamlit Cloud; um rerun não basta.
 
 Ainda assim, **baixar do YouTube a partir de um servidor é pouco confiável**, e
 isso não é um defeito do código: o YouTube trata IPs de datacenter com muito mais
