@@ -443,13 +443,12 @@ def baixar_audio(
             "yt-dlp não está instalado. Rode:  pip install -r requirements.txt"
         ) from exc
 
-    # Baixa o vídeo completo (não só a trilha de áudio) para uma pasta temporária;
-    # o áudio é extraído dele a seguir e o vídeo é apagado ao final do processo em
-    # `processar`. A conversão em si fica a cargo de converter_para_wav16k: o
-    # binário do imageio-ffmpeg não se chama "ffmpeg.exe", e o yt-dlp só aceita
-    # esse nome ao procurar o executável.
+    # Baixa a trilha de áudio crua (m4a/webm/opus) para uma pasta temporária e
+    # deixa a conversão para o converter_para_wav16k: o binário do imageio-ffmpeg
+    # não se chama "ffmpeg.exe", e o yt-dlp só aceita esse nome ao procurar o
+    # executável.
     opts: dict = {
-        "format": "bestvideo+bestaudio/best",
+        "format": "bestaudio/best",
         "outtmpl": str(destino / "%(id)s.%(ext)s"),
         "quiet": True,
         "no_warnings": True,
@@ -734,7 +733,7 @@ def processar(cfg: dict, status) -> Resultado:
     pasta.mkdir(parents=True, exist_ok=True)
 
     # --- áudio ---
-    status.update(label="Baixando o vídeo do YouTube…")
+    status.update(label="Baixando o áudio do YouTube…")
     cookies = cfg["cookies_file"]
     if cfg["cookies_bytes"]:
         arquivo_cookies = pasta / "cookies.txt"
@@ -751,15 +750,14 @@ def processar(cfg: dict, status) -> Resultado:
         log=log,
     )
 
-    status.update(label="Extraindo o áudio do vídeo…")
+    status.update(label="Convertendo o áudio para 16 kHz mono…")
     wav = converter_para_wav16k(origem, pasta / "audio16k.wav")
     log(f"Áudio pronto: {wav.name} ({wav.stat().st_size / 1e6:.1f} MB)")
 
-    # O vídeo (baixado ou enviado) só serve de ponte para o áudio; uma vez
-    # extraído, o arquivo temporário do vídeo é descartado.
+    # A trilha crua já cumpriu seu papel; o que segue para a transcrição é o WAV.
     if origem != wav and origem.exists():
         origem.unlink(missing_ok=True)
-        log(f"Vídeo temporário removido: {origem.name}")
+        log(f"Áudio temporário removido: {origem.name}")
 
     # --- transcrição ---
     status.update(label="Transcrevendo o áudio…")
@@ -786,16 +784,6 @@ st.caption(
     "Cole o link de um vídeo do YouTube. O áudio é extraído, transcrito com "
     "marcação de tempo e entregue em .docx."
 )
-
-# Em servidor o YouTube recusa o download.
-YOUTUBE_BLOQUEADO = NA_NUVEM and not proxy_configurado()
-
-if YOUTUBE_BLOQUEADO:
-    st.warning(
-        "O YouTube recusa downloads vindos de servidores, e este app está hospedado "
-        "em um. O link costuma falhar aqui. (Para habilitar o link, defina "
-        "`YTDLP_PROXY` nos secrets.)"
-    )
 
 url = st.text_input("Link do vídeo", placeholder="https://www.youtube.com/watch?v=…")
 
