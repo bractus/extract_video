@@ -29,6 +29,11 @@ APP_TITLE = "Decupagem de vídeos do YouTube"
 WORKDIR = Path(tempfile.gettempdir()) / "decupagem_youtube"
 WORKDIR.mkdir(parents=True, exist_ok=True)
 
+# O Streamlit Community Cloud monta o repositório em /mount/src. Saber disso muda
+# o que faz sentido oferecer: lá não há navegador de onde tirar cookies, e o
+# YouTube trata o IP do datacenter com muito mais desconfiança.
+NA_NUVEM = Path("/mount/src").exists()
+
 
 # --------------------------------------------------------------------------- #
 # Certificados TLS
@@ -229,6 +234,60 @@ class _LoggerYtdlp:
 # --------------------------------------------------------------------------- #
 # 1) Download e extração do áudio
 # --------------------------------------------------------------------------- #
+# Cada "player client" do YouTube entrega as URLs de mídia sob regras próprias.
+# Quando uma delas é recusada com 403, tentar outro cliente costuma resolver —
+# é o contorno padrão para esse erro.
+CLIENTES_YOUTUBE: tuple[tuple[str, ...] | None, ...] = (
+    None,                 # a rotação que o próprio yt-dlp faz
+    ("android_vr",),      # dispensa o desafio de JavaScript; o que mais funciona em servidor
+    ("tv_simply",),
+    ("web_safari",),
+    ("ios",),
+)
+
+# Erros em que trocar de cliente não adianta: o vídeo simplesmente não está
+# disponível para quem pede.
+ERROS_DEFINITIVOS = (
+    "video unavailable",
+    "private video",
+    "removed by the uploader",
+    "unsupported url",
+    "is not a valid url",
+    "members-only",
+    "this live event will begin",
+)
+
+
+def _extrair_com_rodizio(opts: dict, url: str, log: Callable[[str], None]) -> dict:
+    """Baixa tentando clientes diferentes do YouTube até um funcionar.
+
+    Cada "player client" do YouTube entrega as URLs de mídia sob regras próprias:
+    uns exigem que o desafio de JavaScript seja resolvido, outros não. Quando um
+    é recusado com 403 ou não devolve formato nenhum, outro costuma passar.
+    """
+    import yt_dlp
+
+    ultimo_erro: Exception | None = None
+    for tentativa, clientes in enumerate(CLIENTES_YOUTUBE, start=1):
+        opcoes = dict(opts)
+        if clientes:
+            extras = dict(opcoes.get("extractor_args") or {})
+            extras["youtube"] = {**extras.get("youtube", {}), "player_client": list(clientes)}
+            opcoes["extractor_args"] = extras
+            log(f"Tentativa {tentativa} de {len(CLIENTES_YOUTUBE)}: "
+                f"cliente {', '.join(clientes)}…")
+        try:
+            with yt_dlp.YoutubeDL(opcoes) as ydl:
+                return ydl.extract_info(url, download=True)
+        except Exception as exc:
+            ultimo_erro = exc
+            if any(marca in str(exc).lower() for marca in ERROS_DEFINITIVOS):
+                raise
+            log("Não deu certo; tentando outro cliente do YouTube…")
+
+    raise ultimo_erro  # type: ignore[misc]
+
+
 def baixar_audio(
     url: str,
     destino: Path,
@@ -271,6 +330,10 @@ def baixar_audio(
     if runtimes:
         opts["js_runtimes"] = runtimes
         log(f"Runtime JavaScript: {', '.join(runtimes)}")
+    elif NA_NUVEM:
+        log("Sem runtime JavaScript no servidor: o YouTube vai recusar boa parte dos "
+            "formatos. Acrescente um arquivo packages.txt com a linha 'nodejs' ao "
+            "repositório e reinicie o app.")
     else:
         log("Nenhum runtime JavaScript encontrado; alguns formatos podem faltar. "
             "Instale o Deno ou o Node.js se o download falhar.")
@@ -291,12 +354,13 @@ def baixar_audio(
     if cookies_file:
         opts["cookiefile"] = cookies_file
 
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(url, download=True)
+    info = _extrair_com_rodizio(opts, url, log)
 
     vid = info.get("id", "audio")
+    # As tentativas anteriores podem ter deixado downloads pela metade (.part).
     candidatos = sorted(
-        (p for p in destino.glob(f"{vid}.*") if p.is_file()),
+        (p for p in destino.glob(f"{vid}.*")
+         if p.is_file() and p.suffix.lower() not in (".part", ".ytdl", ".temp")),
         key=lambda p: -p.stat().st_size,
     )
     if not candidatos:
@@ -779,11 +843,16 @@ def processar(cfg: dict, status) -> Resultado:
         log(f"Arquivo recebido: {origem.name}")
     else:
         status.update(label="Baixando o áudio do YouTube…")
+        cookies = cfg["cookies_file"]
+        if cfg["cookies_bytes"]:
+            arquivo_cookies = pasta / "cookies.txt"
+            arquivo_cookies.write_bytes(cfg["cookies_bytes"])
+            cookies = str(arquivo_cookies)
         origem, meta = baixar_audio(
             cfg["url"],
             pasta,
             cookies_browser=cfg["cookies_browser"],
-            cookies_file=cfg["cookies_file"],
+            cookies_file=cookies,
             solver_remoto=cfg["solver_remoto"],
             ca_bundle=cfg["ca_bundle"],
             ignorar_certificado=cfg["ignorar_certificado"],
@@ -853,6 +922,12 @@ with st.sidebar:
         help="O modo local roda na sua máquina e é gratuito. O modo AssemblyAI é mais "
              "rápido e já traz a separação de falantes pronta, mas exige chave de API.",
     )
+
+    if NA_NUVEM and backend == "Local (faster-whisper)":
+        st.caption(
+            "O servidor tem pouca memória: use o modelo `small` ou menor, ou troque "
+            "para a AssemblyAI. A diarização com pyannote costuma estourar o limite."
+        )
 
     assembly_key = hf_token = ""
     modelo = "small"
@@ -925,20 +1000,31 @@ with st.sidebar:
             "O YouTube às vezes exige login ou verificação. Nesses casos, reaproveite "
             "os cookies de um navegador em que você já esteja logado."
         )
-        usar_cookies = st.selectbox("Cookies", ["Nenhum", "Do navegador", "De arquivo"])
-        cookies_browser = cookies_file = None
+        opcoes_cookies = ["Nenhum", "Enviar arquivo cookies.txt"]
+        if not NA_NUVEM:
+            opcoes_cookies.insert(1, "Do navegador")
+        usar_cookies = st.selectbox("Cookies", opcoes_cookies)
+
+        cookies_browser = cookies_file = cookies_bytes = None
         if usar_cookies == "Do navegador":
             cookies_browser = st.selectbox(
                 "Navegador", ["chrome", "edge", "firefox", "brave", "opera", "vivaldi"]
             )
-        elif usar_cookies == "De arquivo":
-            cookies_file = st.text_input("Caminho do cookies.txt (formato Netscape)") or None
+        elif usar_cookies == "Enviar arquivo cookies.txt":
+            enviado = st.file_uploader("cookies.txt (formato Netscape)", type=["txt"])
+            if enviado is not None:
+                cookies_bytes = enviado.getvalue()
+            st.caption(
+                "Exporte com uma extensão de navegador como a 'Get cookies.txt LOCALLY', "
+                "estando logado no YouTube."
+            )
 
         solver_remoto = st.checkbox(
             "Baixar o solucionador de desafios do YouTube",
-            value=False,
-            help="Use se o download falhar por falta de formatos. O yt-dlp busca no "
-                 "GitHub o script oficial que resolve os desafios do YouTube.",
+            value=NA_NUVEM,
+            help="O yt-dlp busca no GitHub o script oficial que resolve os desafios do "
+                 "YouTube. Praticamente obrigatório em servidor; local, use só se o "
+                 "download falhar por falta de formatos.",
         )
 
     with st.expander("Erro de certificado (rede corporativa)"):
@@ -1012,6 +1098,7 @@ if executar:
             "max_falantes": max_falantes,
             "cookies_browser": cookies_browser,
             "cookies_file": cookies_file,
+            "cookies_bytes": cookies_bytes,
             "solver_remoto": solver_remoto,
             "ca_bundle": ca_bundle,
             "ignorar_certificado": ignorar_certificado,
@@ -1037,11 +1124,31 @@ if executar:
                     "informe o .pem da sua empresa ou, em último caso, desative a "
                     "verificação. Se estiver em casa, tente sem o proxy da VPN."
                 )
+            elif "403" in texto_erro or "forbidden" in texto_erro:
+                st.warning(
+                    "**HTTP 403 no download da mídia.** Os dados do vídeo chegaram, mas "
+                    "o YouTube recusou a URL do áudio."
+                    + (
+                        "\n\nEm servidor isso é a regra, não a exceção: o YouTube trata "
+                        "IPs de datacenter com desconfiança e exige que os desafios de "
+                        "JavaScript sejam resolvidos. Verifique se o `packages.txt` do "
+                        "repositório tem a linha `nodejs`, deixe marcada a opção de "
+                        "baixar o solucionador de desafios e, se ainda assim falhar, "
+                        "envie um `cookies.txt` — tudo na barra lateral.\n\n"
+                        "Quando nada disso resolve, o caminho confiável é usar a fonte "
+                        "**Arquivo local**: baixe o vídeo na sua máquina e envie aqui."
+                        if NA_NUVEM else
+                        "\n\nMarque *Baixar o solucionador de desafios do YouTube* na "
+                        "barra lateral e tente de novo; se persistir, envie um "
+                        "`cookies.txt` de uma sessão logada."
+                    )
+                )
             elif "sign in" in texto_erro or "bot" in texto_erro or "private" in texto_erro:
                 st.warning(
                     "O YouTube pediu autenticação. Em **Vídeo restrito ou bloqueado** "
-                    "na barra lateral, escolha os cookies do navegador em que você já "
-                    "está logado."
+                    "na barra lateral, "
+                    + ("envie um `cookies.txt` de uma sessão logada." if NA_NUVEM else
+                       "escolha os cookies do navegador em que você já está logado.")
                 )
             with st.expander("Detalhes técnicos"):
                 import traceback
