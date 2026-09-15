@@ -90,10 +90,36 @@ Node, Bun ou QuickJS que estiver instalado; se não houver nenhum, instale o
 [Deno](https://deno.com/) ou o [Node.js](https://nodejs.org/). Quando ainda
 assim faltarem formatos, marque *Baixar o solucionador de desafios do YouTube*.
 
+**`HTTP Error 403: Forbidden` no download** — os dados do vídeo chegaram, mas o
+YouTube recusou a URL da mídia. Quase sempre é o desafio de JavaScript que não
+foi resolvido: confirme que existe um runtime instalado (veja o item anterior).
+O app ainda tenta sozinho vários *player clients* do YouTube antes de desistir,
+porque cada um entrega as URLs sob regras diferentes.
+
 **Transcrição muito lenta** — troque para um modelo menor (`base` ou `tiny`) ou
 use o motor AssemblyAI.
+
+## Publicação no Streamlit Community Cloud
+
+O `packages.txt` deste repositório instala o `nodejs` e o `ffmpeg` no servidor —
+sem o runtime de JavaScript o YouTube recusa quase todos os formatos e o download
+termina em 403.
+
+Ainda assim, **baixar do YouTube a partir de um servidor é pouco confiável**, e
+isso não é um defeito do código: o YouTube trata IPs de datacenter com muito mais
+desconfiança do que uma conexão doméstica, e pode recusar o download mesmo com
+tudo configurado. Quando isso acontecer, as saídas são:
+
+1. usar a fonte **Arquivo local**, enviando o áudio ou vídeo já baixado;
+2. enviar um `cookies.txt` de uma sessão logada, pela barra lateral;
+3. rodar o app na sua máquina, onde o download funciona normalmente.
+
+Vale lembrar também que o plano gratuito tem pouca memória: prefira o motor
+AssemblyAI ou modelos pequenos, já que o pyannote e os modelos grandes do Whisper
+costumam estourar o limite.
 
 ## Arquivos
 
 - `app.py` — o aplicativo inteiro (interface e processamento).
 - `requirements.txt` — todas as dependências.
+- `packages.txt` — pacotes de sistema para o Streamlit Community Cloud.
