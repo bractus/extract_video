@@ -424,11 +424,13 @@ def baixar_audio(
             "yt-dlp não está instalado. Rode:  pip install -r requirements.txt"
         ) from exc
 
-    # Baixa a trilha de áudio crua (m4a/webm/opus) e deixa a conversão para o
-    # converter_para_wav16k: o binário do imageio-ffmpeg não se chama "ffmpeg.exe",
-    # e o yt-dlp só aceita esse nome ao procurar o executável.
+    # Baixa o vídeo completo (não só a trilha de áudio) para uma pasta temporária;
+    # o áudio é extraído dele a seguir e o vídeo é apagado ao final do processo em
+    # `processar`. A conversão em si fica a cargo de converter_para_wav16k: o
+    # binário do imageio-ffmpeg não se chama "ffmpeg.exe", e o yt-dlp só aceita
+    # esse nome ao procurar o executável.
     opts: dict = {
-        "format": "bestaudio/best",
+        "format": "bestvideo+bestaudio/best",
         "outtmpl": str(destino / "%(id)s.%(ext)s"),
         "quiet": True,
         "no_warnings": True,
@@ -733,9 +735,15 @@ def processar(cfg: dict, status) -> Resultado:
             log=log,
         )
 
-    status.update(label="Convertendo o áudio para 16 kHz mono…")
+    status.update(label="Extraindo o áudio do vídeo…")
     wav = converter_para_wav16k(origem, pasta / "audio16k.wav")
     log(f"Áudio pronto: {wav.name} ({wav.stat().st_size / 1e6:.1f} MB)")
+
+    # O vídeo (baixado ou enviado) só serve de ponte para o áudio; uma vez
+    # extraído, o arquivo temporário do vídeo é descartado.
+    if origem != wav and origem.exists():
+        origem.unlink(missing_ok=True)
+        log(f"Vídeo temporário removido: {origem.name}")
 
     # --- transcrição ---
     status.update(label="Transcrevendo o áudio…")
