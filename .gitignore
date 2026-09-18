@@ -11,3 +11,5 @@ venv/
 # Credenciais: o cookies.txt equivale a estar logado na conta do YouTube
 cookies.txt
 .streamlit/secrets.toml
+
+.env

@@ -9,6 +9,7 @@ Execução:  streamlit run app.py
 """
 from __future__ import annotations
 
+import base64
 import datetime as dt
 import io
 import os
@@ -18,11 +19,16 @@ import subprocess
 import sys
 import tempfile
 import time
+import wave
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+import requests
 import streamlit as st
+from dotenv import load_dotenv
+
+load_dotenv()
 
 APP_TITLE = "Decupagem de vídeos do YouTube"
 WORKDIR = Path(tempfile.gettempdir()) / "decupagem_youtube"
@@ -551,117 +557,176 @@ def converter_para_wav16k(origem: Path, destino: Path) -> Path:
 
 
 # --------------------------------------------------------------------------- #
-# 2) Transcrição local — faster-whisper
+# 2) Transcrição e revisão via OpenRouter
 # --------------------------------------------------------------------------- #
-# O peso do app é quase todo aqui. Em CPU limitada — como a do Streamlit
-# Community Cloud, que derruba a cota quando o processo insiste em usar tudo —
-# o modelo 'small' leva perto de 3x o tempo do 'base' sem ganho proporcional em
-# português. Quem tiver máquina folgada pode subir de volta definindo
-# WHISPER_MODELO=small (ou descer para 'tiny', mais rápido e mais impreciso).
-MODELO = os.environ.get("WHISPER_MODELO", "base")
-DISPOSITIVO = "cpu"
-COMPUTE_TYPE = "int8"     # quantizacao que torna o modelo viavel em CPU
+# Transcrever localmente com faster-whisper satura a CPU do Streamlit
+# Community Cloud. Em vez disso o áudio é enviado ao OpenRouter — o mesmo
+# modelo faz a transcrição (precisa aceitar entrada de áudio, ex.:
+# google/gemini-2.5-flash) e depois revisa a pontuação do texto resultante.
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
+OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "")
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 IDIOMA = "pt"
 
-# Sem limite explícito o CTranslate2 abre uma thread por núcleo visível e satura
-# a máquina — que é justamente o que dispara o estrangulamento no servidor.
-THREADS = max(1, min(2, (os.cpu_count() or 2)))
+# Tamanho dos pedaços enviados ao modelo de áudio: sem dividir, um vídeo longo
+# vira um payload base64 enorme e esbarra no limite de contexto/upload do
+# provedor por trás do OpenRouter.
+DURACAO_MAXIMA_PEDACO = 600.0  # segundos
+
+PROMPT_TRANSCRICAO = (
+    "Transcreva integralmente a fala deste áudio em português do Brasil, "
+    "literalmente, sem resumir, sem traduzir e sem descrever sons.\n"
+    "Divida a transcrição em trechos a cada pausa natural da fala (troca de "
+    "assunto, respiração longa, silêncio) e marque o início de cada trecho no "
+    "formato [MM:SS], relativo ao início deste áudio. Exemplo de formato:\n"
+    "[00:00] Primeiro trecho de fala.\n"
+    "[00:18] Segundo trecho de fala.\n"
+    "Se não houver fala perceptível, responda apenas [00:00] (sem fala)."
+)
+
+PROMPT_REVISAO = (
+    "O texto abaixo é uma transcrição de fala em português do Brasil, feita "
+    "automaticamente. Revise só a pontuação, a acentuação e erros óbvios de "
+    "transcrição. Não resuma, não traduza, não remova nem acrescente "
+    "informação, e não mude o sentido das frases. Devolva somente o texto "
+    "revisado, sem comentários nem aspas.\n\n---\n\n{texto}"
+)
+
+_RE_MARCADOR_TEMPO = re.compile(r"\[(\d{1,3}):(\d{2})\]\s*")
 
 
-@st.cache_resource(show_spinner=False)
-def carregar_whisper():
-    from faster_whisper import WhisperModel
+def _openrouter_chat(mensagens: list[dict], modelo: str) -> str:
+    """Chama o endpoint de chat completions do OpenRouter e devolve o texto."""
+    if not OPENROUTER_API_KEY:
+        raise RuntimeError("Defina OPENROUTER_API_KEY no arquivo .env.")
+    if not modelo:
+        raise RuntimeError("Modelo do OpenRouter não configurado no .env.")
 
-    return WhisperModel(
-        MODELO, device=DISPOSITIVO, compute_type=COMPUTE_TYPE, cpu_threads=THREADS
+    resposta = requests.post(
+        OPENROUTER_URL,
+        headers={
+            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        json={"model": modelo, "messages": mensagens},
+        timeout=600,
     )
+    resposta.raise_for_status()
+    dados = resposta.json()
+    return dados["choices"][0]["message"]["content"]
 
 
-def transcrever_local(
+def _dividir_wav(caminho: Path, duracao_maxima: float) -> list[tuple[float, float, bytes]]:
+    """Divide um WAV mono em pedaços de até `duracao_maxima` segundos.
+
+    Devolve uma lista de (início, fim, bytes do WAV do pedaço), com os tempos
+    em segundos relativos ao início do arquivo original.
+    """
+    with wave.open(str(caminho), "rb") as origem:
+        taxa = origem.getframerate()
+        canais = origem.getnchannels()
+        largura = origem.getsampwidth()
+        total_frames = origem.getnframes()
+        frames_por_pedaco = max(1, int(duracao_maxima * taxa))
+
+        pedacos: list[tuple[float, float, bytes]] = []
+        inicio_frame = 0
+        while inicio_frame < total_frames:
+            origem.setpos(inicio_frame)
+            n = min(frames_por_pedaco, total_frames - inicio_frame)
+            dados = origem.readframes(n)
+
+            buffer = io.BytesIO()
+            with wave.open(buffer, "wb") as pedaco:
+                pedaco.setnchannels(canais)
+                pedaco.setsampwidth(largura)
+                pedaco.setframerate(taxa)
+                pedaco.writeframes(dados)
+
+            pedacos.append((inicio_frame / taxa, (inicio_frame + n) / taxa, buffer.getvalue()))
+            inicio_frame += n
+    return pedacos
+
+
+def _parse_transcricao(texto: str, offset: float) -> list[Bloco]:
+    """Interpreta a resposta do modelo (marcadores [MM:SS]) em Blocos.
+
+    `offset` é o início do pedaço de áudio em relação ao vídeo inteiro, já que
+    o modelo só enxerga o pedaço e marca o tempo a partir de zero.
+    """
+    marcas = list(_RE_MARCADOR_TEMPO.finditer(texto))
+    if not marcas:
+        sobra = texto.strip()
+        return [Bloco(inicio=offset, fim=offset, texto=sobra)] if sobra else []
+
+    blocos: list[Bloco] = []
+    for i, marca in enumerate(marcas):
+        minutos, segundos = int(marca.group(1)), int(marca.group(2))
+        inicio = offset + minutos * 60 + segundos
+        fim_corpo = marcas[i + 1].start() if i + 1 < len(marcas) else len(texto)
+        corpo = re.sub(r"\s+", " ", texto[marca.end():fim_corpo]).strip()
+        if corpo:
+            blocos.append(Bloco(inicio=inicio, fim=inicio, texto=corpo))
+
+    for i in range(len(blocos) - 1):
+        blocos[i].fim = blocos[i + 1].inicio
+    return blocos
+
+
+def transcrever_openrouter(
     wav: Path,
     progresso: Callable[[float], None] = lambda _p: None,
     log: Callable[[str], None] = lambda _m: None,
-) -> tuple[list[dict], str]:
-    """Transcreve e devolve (lista de palavras com tempo, idioma)."""
-    log(f"Carregando o modelo Whisper '{MODELO}' ({DISPOSITIVO}/{COMPUTE_TYPE})…")
-    modelo_w = carregar_whisper()
-
-    segmentos, info = modelo_w.transcribe(
-        str(wav),
-        language=IDIOMA,
-        task="transcribe",
-        # Busca gulosa: o beam de 5 decodifica cinco hipóteses em paralelo e
-        # multiplica o custo sem mudar muito o texto em fala clara.
-        beam_size=1,
-        # O VAD corta o silêncio antes de decodificar — economia, não custo.
-        vad_filter=True,
-        vad_parameters={"min_silence_duration_ms": 500},
-        # Marcar palavra a palavra exige um passo extra de alinhamento por
-        # segmento. Como os blocos são agrupados de qualquer forma, o tempo por
-        # segmento já basta para a decupagem.
-        word_timestamps=False,
-        condition_on_previous_text=False,
-    )
-    total = float(getattr(info, "duration", 0.0)) or 1.0
-
-    palavras: list[dict] = []
-    for seg in segmentos:
-        if texto := seg.text.strip():
-            # O espaço à esquerda mantém a junção correta em montar_blocos, que
-            # concatena os trechos sem separador (as palavras já vinham assim).
-            palavras.append(
-                {"inicio": float(seg.start), "fim": float(seg.end), "texto": " " + texto}
-            )
-        progresso(min(1.0, float(seg.end) / total))
-    progresso(1.0)
-    return palavras, IDIOMA
-
-
-# --------------------------------------------------------------------------- #
-# 3) Montagem dos blocos de fala
-# --------------------------------------------------------------------------- #
-def montar_blocos(
-    palavras: list[dict],
-    pausa_maxima: float = 2.0,
-    duracao_maxima: float = 40.0,
-    duracao_limite: float = 75.0,
-) -> list[Bloco]:
-    """Agrupa palavras em blocos de fala.
-
-    O corte acontece em pausas longas e, quando o bloco já está comprido, na
-    primeira fronteira natural do texto — ponto final primeiro, vírgula depois.
-    Acima de `duracao_limite` o corte é forçado, porque fala corrida sem
-    pontuação renderia parágrafos intransponíveis no documento.
-    """
-    if not palavras:
-        return []
+) -> tuple[list[Bloco], str]:
+    """Transcreve o áudio via OpenRouter e devolve (blocos, idioma)."""
+    pedacos = _dividir_wav(wav, DURACAO_MAXIMA_PEDACO)
+    duracao_total = pedacos[-1][1] if pedacos else 1.0
+    log(f"Áudio dividido em {len(pedacos)} pedaço(s) de até "
+        f"{hms(DURACAO_MAXIMA_PEDACO)} para enviar ao modelo "
+        f"'{OPENROUTER_MODEL}'.")
 
     blocos: list[Bloco] = []
-    atual: list[dict] = []
+    for indice, (inicio, fim, dados_wav) in enumerate(pedacos, start=1):
+        log(f"Transcrevendo pedaço {indice}/{len(pedacos)} ({hms(inicio)}–{hms(fim)})…")
+        audio_b64 = base64.b64encode(dados_wav).decode("ascii")
+        mensagens = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": PROMPT_TRANSCRICAO},
+                    {
+                        "type": "input_audio",
+                        "input_audio": {"data": audio_b64, "format": "wav"},
+                    },
+                ],
+            }
+        ]
+        texto = _openrouter_chat(mensagens, OPENROUTER_MODEL)
+        novos = _parse_transcricao(texto, offset=inicio)
+        if novos:
+            novos[-1].fim = fim
+        blocos.extend(novos)
+        progresso(min(1.0, fim / duracao_total))
 
-    def fecha():
-        if not atual:
-            return
-        texto = re.sub(r"\s+", " ", "".join(p["texto"] for p in atual)).strip()
-        if texto:
-            blocos.append(Bloco(inicio=atual[0]["inicio"], fim=atual[-1]["fim"], texto=texto))
-        atual.clear()
+    progresso(1.0)
+    return blocos, IDIOMA
 
-    for p in palavras:
-        if atual:
-            anterior = atual[-1]["texto"].strip()
-            decorrido = p["fim"] - atual[0]["inicio"]
-            corta = (
-                p["inicio"] - atual[-1]["fim"] > pausa_maxima
-                or (decorrido > duracao_maxima and anterior.endswith((".", "?", "!", "…")))
-                or (decorrido > duracao_maxima * 1.5 and anterior.endswith((",", ";", ":")))
-                or decorrido > duracao_limite
-            )
-            if corta:
-                fecha()
-        atual.append(p)
-    fecha()
-    return blocos
+
+def revisar_texto_openrouter(texto: str, log: Callable[[str], None] = lambda _m: None) -> str:
+    """Revisa pontuação/acentuação de um trecho via OpenRouter.
+
+    Em caso de falha (modelo não configurado, erro de rede etc.) devolve o
+    texto original em vez de interromper a decupagem inteira por causa de um
+    único trecho.
+    """
+    if not OPENROUTER_MODEL:
+        return texto
+    try:
+        mensagens = [{"role": "user", "content": PROMPT_REVISAO.format(texto=texto)}]
+        return _openrouter_chat(mensagens, OPENROUTER_MODEL).strip()
+    except Exception as exc:
+        log(f"Revisão do texto falhou, mantendo o trecho original: {exc}")
+        return texto
 
 
 # --------------------------------------------------------------------------- #
@@ -753,18 +818,23 @@ def processar(cfg: dict, status) -> Resultado:
         log(f"Áudio temporário removido: {origem.name}")
 
     # --- transcrição ---
-    status.update(label="Transcrevendo o áudio…")
+    status.update(label="Transcrevendo o áudio pelo OpenRouter…")
     barra = st.progress(0.0, text="Transcrição em andamento…")
-    palavras, idioma = transcrever_local(
+    blocos, idioma = transcrever_openrouter(
         wav,
         progresso=lambda p: barra.progress(p, text=f"Transcrição: {p:.0%}"),
         log=log,
     )
     barra.empty()
-    blocos = montar_blocos(palavras)
+    log(f"{len(blocos)} trechos de fala gerados.")
+
+    # --- revisão ---
+    status.update(label="Revisando o texto…")
+    for i, bloco in enumerate(blocos, start=1):
+        log(f"Revisando trecho {i}/{len(blocos)}…")
+        bloco.texto = revisar_texto_openrouter(bloco.texto, log=log)
 
     meta["duracao"] = meta.get("duracao") or (blocos[-1].fim if blocos else 0.0)
-    log(f"{len(blocos)} trechos de fala gerados.")
     return Resultado(blocos=blocos, meta=meta, idioma=idioma)
 
 

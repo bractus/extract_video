@@ -4,3 +4,66 @@ maxUploadSize = 400
 
 [browser]
 gatherUsageStats = false
+
+# Tema inspirado no claude.ai: fundo bege quente, acento terracota,
+# titulos em serifada e corpo em sans-serif.
+[theme]
+font = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+headingFont = "'Source Serif 4':https://fonts.googleapis.com/css2?family=Source+Serif+4:wght@500;600;700&display=swap"
+codeFont = "'JetBrains Mono':https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap"
+baseFontSize = 16
+baseRadius = "12px"
+buttonRadius = "10px"
+showWidgetBorder = true
+showSidebarBorder = true
+linkUnderline = false
+
+redColor = "#C05146"
+orangeColor = "#D97757"
+yellowColor = "#C9973F"
+greenColor = "#6B8F71"
+blueColor = "#5B8AA6"
+violetColor = "#8A7CA8"
+grayColor = "#83827D"
+
+[theme.light]
+primaryColor = "#D97757"
+backgroundColor = "#FAF9F5"
+secondaryBackgroundColor = "#F0EEE6"
+textColor = "#2D2D2A"
+linkColor = "#C15F3C"
+borderColor = "#E5E3DA"
+codeBackgroundColor = "#F0EEE6"
+codeTextColor = "#2D2D2A"
+dataframeBorderColor = "#E5E3DA"
+dataframeHeaderBackgroundColor = "#F0EEE6"
+chartCategoricalColors = ["#D97757", "#5B8AA6", "#6B8F71", "#8A7CA8", "#C9973F", "#C05146", "#83827D"]
+
+[theme.dark]
+primaryColor = "#E08A66"
+backgroundColor = "#262624"
+secondaryBackgroundColor = "#30302E"
+textColor = "#F5F4EE"
+linkColor = "#E08A66"
+borderColor = "#3E3E3A"
+codeBackgroundColor = "#30302E"
+codeTextColor = "#F5F4EE"
+dataframeBorderColor = "#3E3E3A"
+dataframeHeaderBackgroundColor = "#30302E"
+chartCategoricalColors = ["#E08A66", "#7FADC7", "#8FB894", "#A996C9", "#DDB35F", "#D97768", "#A6A49D"]
+
+[theme.light.sidebar]
+backgroundColor = "#F0EEE6"
+secondaryBackgroundColor = "#E5E3DA"
+textColor = "#2D2D2A"
+borderColor = "#E5E3DA"
+primaryColor = "#D97757"
+codeBackgroundColor = "#E5E3DA"
+
+[theme.dark.sidebar]
+backgroundColor = "#1F1E1D"
+secondaryBackgroundColor = "#30302E"
+textColor = "#F5F4EE"
+borderColor = "#3E3E3A"
+primaryColor = "#E08A66"
+codeBackgroundColor = "#30302E"

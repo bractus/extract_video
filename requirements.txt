@@ -1,8 +1,11 @@
 # Interface, download do YouTube, transcricao com tempos e exportacao .docx
 streamlit>=1.36
 yt-dlp>=2024.8.6
-faster-whisper>=1.0.3
 python-docx>=1.1.0
+
+# Transcricao e revisao de texto via OpenRouter (nao roda mais Whisper local)
+requests>=2.31
+python-dotenv>=1.0
 
 # ffmpeg empacotado, dispensa instalar no sistema
 imageio-ffmpeg>=0.5.1
